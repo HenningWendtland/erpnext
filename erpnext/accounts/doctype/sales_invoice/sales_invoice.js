@@ -1055,6 +1055,13 @@ frappe.ui.form.on("Sales Invoice", {
 								options: "Project",
 								default: frm.doc.project,
 							},
+							{
+								label: __("Customer"),
+								fieldname: "customer",
+								fieldtype: "Link",
+								options: "Customer",
+								default: frm.doc.customer,
+							},
 						],
 						primary_action: function () {
 							const data = d.get_values();
@@ -1062,6 +1069,7 @@ frappe.ui.form.on("Sales Invoice", {
 								from_time: data.from_time,
 								to_time: data.to_time,
 								project: data.project,
+								customer: data.customer,
 								item_code: data.item_code,
 							});
 							d.hide();

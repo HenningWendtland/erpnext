@@ -289,10 +289,12 @@ class Timesheet(Document):
 
 
 @frappe.whitelist()
-def get_projectwise_timesheet_data(project=None, parent=None, from_time=None, to_time=None):
+def get_projectwise_timesheet_data(project=None, customer=None, parent=None, from_time=None, to_time=None):
 	condition = ""
 	if project:
 		condition += "AND tsd.project = %(project)s "
+	if project:
+		condition += "AND tsd.customer = %(customer)s "
 	if parent:
 		condition += "AND tsd.parent = %(parent)s "
 	if from_time and to_time:
@@ -322,7 +324,13 @@ def get_projectwise_timesheet_data(project=None, parent=None, from_time=None, to
 		ORDER BY tsd.from_time ASC
 	"""
 
-	filters = {"project": project, "parent": parent, "from_time": from_time, "to_time": to_time}
+	filters = {
+		"project": project,
+		"customer": customer,
+		"parent": parent,
+		"from_time": from_time,
+		"to_time": to_time,
+	}
 
 	return frappe.db.sql(query, filters, as_dict=1)
 

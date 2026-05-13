@@ -1158,13 +1158,15 @@ frappe.ui.form.on("Payment Entry", {
 			frappe.meta.get_docfield("Payment Entry Reference", "allocated_gross_amount"),
 			frm.doc
 		);
+		let changed = false;
 		for (const row of frm.doc.references || []) {
 			const new_gross = flt(flt(row.allocated_amount) * ratio, precision);
 			if (flt(new_gross, precision) !== flt(row.allocated_gross_amount, precision)) {
 				row.allocated_gross_amount = new_gross;
+				changed = true;
 			}
 		}
-		frm.refresh_field("references");
+		if (changed) frm.refresh_field("references");
 	},
 
 	set_total_allocated_amount: function (frm) {
@@ -1837,21 +1839,6 @@ frappe.ui.form.on("Payment Entry Reference", {
 			frappe.model.set_value(cdt, cdn, "allocated_gross_amount", new_gross);
 		}
 		frm.events.set_total_allocated_amount(frm);
-	},
-
-	allocated_gross_amount: function (frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		const ratio = frm.events.get_gross_net_ratio(frm);
-		const precision = frappe.meta.get_field_precision(
-			frappe.meta.get_docfield("Payment Entry Reference", "allocated_amount"),
-			frm.doc
-		);
-		const new_net = ratio
-			? flt(flt(row.allocated_gross_amount) / ratio, precision)
-			: flt(row.allocated_gross_amount, precision);
-		if (flt(new_net, precision) !== flt(row.allocated_amount, precision)) {
-			frappe.model.set_value(cdt, cdn, "allocated_amount", new_net);
-		}
 	},
 
 	references_remove: function (frm) {

@@ -1132,10 +1132,14 @@ frappe.ui.form.on("Payment Entry", {
 	get_gross_net_ratio: function (frm) {
 		// Ratio of gross paid amount to net (paid_amount_after_tax). Returns 1 when there
 		// are no included-in-paid-amount taxes, so callers can multiply unconditionally.
+		const exchange_rate =
+			frm.doc.payment_type === "Pay"
+				? flt(frm.doc.target_exchange_rate) || 1
+				: flt(frm.doc.source_exchange_rate) || 1;
 		let included_taxes = 0;
 		for (const tax of frm.doc.taxes || []) {
 			if (!cint(tax.included_in_paid_amount)) continue;
-			const amount = flt(tax.tax_amount);
+			const amount = flt(tax.base_tax_amount) / exchange_rate;
 			included_taxes += tax.add_deduct_tax === "Deduct" ? -amount : amount;
 		}
 		const paid = flt(frm.doc.paid_amount);

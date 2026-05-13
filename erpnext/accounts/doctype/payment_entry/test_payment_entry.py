@@ -614,6 +614,137 @@ class TestPaymentEntry(ERPNextTestSuite):
 		self.assertEqual(flt(si.advances[0].allocated_gross_amount, 2), 59.5)
 		self.assertEqual(flt(si.total_advance, 2), 59.5)
 
+	def test_allocated_gross_amount_multicurrency(self):
+		"""Multi-currency PE: party currency (USD) differs from company currency (INR).
+		Advance-tax rows are written in company currency (`tax.tax_amount` is in INR
+		because tax accounts are company-currency only), but `allocated_amount` is in
+		party currency (USD). `set_allocated_gross_amount` must convert the tax share
+		via the exchange rate so `allocated_gross_amount` stays in USD."""
+		# USD SO at uneven amount; deliberate 17% VAT (instead of even 19%/20%) and a
+		# realistic uneven USD->INR rate to surface any FX mishandling.
+		so = make_sales_order(
+			customer="_Test Customer USD",
+			currency="USD",
+			qty=1,
+			rate=2499.93,
+			do_not_save=True,
+		)
+		so.conversion_rate = 82.5
+		so.plc_conversion_rate = 82.5
+		so.insert()
+		so.submit()
+
+		pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Bank USD - _TC")
+		pe.reference_no = "MC-TEST-1"
+		pe.reference_date = nowdate()
+		pe.source_exchange_rate = 82.5
+		pe.target_exchange_rate = 82.5
+		pe.paid_amount = pe.received_amount = 2499.93
+		# Net portion in USD: 2499.93 / 1.17 ≈ 2136.69
+		pe.references[0].allocated_amount = 2136.69
+		pe.append(
+			"taxes",
+			{
+				"account_head": "_Test Account Service Tax - _TC",
+				"charge_type": "On Paid Amount",
+				"rate": 17,
+				"tax_amount": 0,
+				"base_tax_amount": 0,
+				"add_deduct_tax": "Add",
+				"included_in_paid_amount": 1,
+				"description": "VAT 17%",
+			},
+		)
+		pe.save()
+
+		# tax.tax_amount is in company currency (INR), roughly:
+		#   base_paid = 2499.93 * 82.5 = 206,244.225
+		#   net = base_paid / 1.17 = 176,277.97; tax = 0.17 * net = ~29,967 INR
+		# (exact value drifts a fraction of an INR from cumulated_tax_fraction rounding)
+		self.assertAlmostEqual(flt(pe.taxes[0].tax_amount, 2), 29967.25, delta=1.0)
+
+		# allocated_gross_amount must be in USD = 2136.69 + (29,967.25 / 82.5) = 2499.93.
+		# Without the FX conversion, the bug would add ~29,967 INR to 2136.69 USD,
+		# producing a value > 30,000 — i.e. > 10x the actual USD gross.
+		self.assertAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 2499.93, delta=0.10)
+
+	def test_unlink_redistributes_allocated_gross_amount(self):
+		"""Unlinking one of several taxed-advance references must recompute
+		`allocated_gross_amount` on the surviving references so the freed tax share is
+		absorbed (and not silently stale in DB — the unlink flow does not save the PE,
+		so the new persistence loop has to update child rows directly).
+		`clear_unallocated_reference_document_rows` then deletes the unlinked row from
+		DB, so the surviving rows are what we must verify."""
+		from erpnext.accounts.utils import remove_ref_doc_link_from_pe
+
+		# Two SOs with deliberately uneven shares of a 1547.39 gross advance + 17% VAT.
+		so1 = make_sales_order(qty=1, rate=850.00)
+		so2 = make_sales_order(qty=1, rate=697.39)
+		pe = get_payment_entry("Sales Order", so1.name, bank_account="_Test Cash - _TC")
+		pe.paid_from = "Debtors - _TC"
+		pe.paid_amount = pe.received_amount = 1547.39
+		# Net portion: 1547.39 / 1.17 = 1322.56. Split unevenly between the two refs.
+		pe.references[0].allocated_amount = 700.00
+		pe.append(
+			"references",
+			{
+				"reference_doctype": "Sales Order",
+				"reference_name": so2.name,
+				"total_amount": so2.grand_total,
+				"outstanding_amount": so2.grand_total,
+				"allocated_amount": 622.56,
+			},
+		)
+		pe.append(
+			"taxes",
+			{
+				"account_head": "_Test Account Service Tax - _TC",
+				"charge_type": "On Paid Amount",
+				"rate": 17,
+				"tax_amount": 0,
+				"base_tax_amount": 0,
+				"add_deduct_tax": "Add",
+				"included_in_paid_amount": 1,
+				"description": "VAT 17%",
+			},
+		)
+		pe.save()
+		pe.submit()
+
+		# Sanity: gross totals match paid_amount across both refs (proportional split).
+		pe.reload()
+		so1_ref = next(r for r in pe.references if r.reference_name == so1.name)
+		so2_ref = next(r for r in pe.references if r.reference_name == so2.name)
+		gross_sum = flt(so1_ref.allocated_gross_amount) + flt(so2_ref.allocated_gross_amount)
+		self.assertAlmostEqual(gross_sum, 1547.39, delta=0.05)
+
+		# Capture surviving ref's allocated_amount to compute expected post-unlink gross.
+		so2_allocated = flt(so2_ref.allocated_amount)
+		tax_total = flt(pe.taxes[0].tax_amount)
+
+		remove_ref_doc_link_from_pe("Sales Order", so1.name, pe.name)
+
+		pe.reload()
+		# Unlinked row is deleted from DB (clear_unallocated removes
+		# zero-allocated rows).
+		self.assertFalse(
+			any(r.reference_name == so1.name for r in pe.references),
+			"unlinked row should be removed from DB",
+		)
+
+		# Surviving row: allocated_amount unchanged, allocated_gross_amount absorbs
+		# the full tax (it's the only ref left in the breakdown). Without the new
+		# `frappe.db.set_value` loop in `remove_ref_doc_link_from_pe`, this would
+		# still be the pre-unlink proportional share (~847 — net + ref's old tax
+		# slice), not the full gross.
+		so2_ref = next(r for r in pe.references if r.reference_name == so2.name)
+		self.assertAlmostEqual(flt(so2_ref.allocated_amount, 2), so2_allocated, delta=0.01)
+		self.assertAlmostEqual(
+			flt(so2_ref.allocated_gross_amount, 2),
+			flt(so2_allocated + tax_total, 2),
+			delta=0.05,
+		)
+
 	def test_allocate_amount_to_references_subtracts_included_taxes(self):
 		"""`allocate_amount_to_references` distributes paid_amount_after_tax (not the
 		gross paid_amount) when there are included-in-paid-amount tax rows. So when

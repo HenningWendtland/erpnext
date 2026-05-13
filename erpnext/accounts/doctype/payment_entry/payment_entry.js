@@ -382,7 +382,7 @@ frappe.ui.form.on("Payment Entry", {
 		frm.set_df_property("total_taxes_and_charges", "options", currency_field);
 
 		frm.set_currency_labels(
-			["total_amount", "outstanding_amount", "allocated_amount"],
+			["total_amount", "outstanding_amount", "allocated_amount", "allocated_gross_amount"],
 			party_account_currency,
 			"references"
 		);
@@ -405,9 +405,11 @@ frappe.ui.form.on("Payment Entry", {
 			frm.doc.payment_type === "Receive" ? "paid_from_account_currency" : "paid_to_account_currency";
 
 		var reference_grid = frm.fields_dict["references"].grid;
-		["total_amount", "outstanding_amount", "allocated_amount"].forEach((fieldname) => {
-			reference_grid.update_docfield_property(fieldname, "options", party_currency);
-		});
+		["total_amount", "outstanding_amount", "allocated_amount", "allocated_gross_amount"].forEach(
+			(fieldname) => {
+				reference_grid.update_docfield_property(fieldname, "options", party_currency);
+			}
+		);
 
 		reference_grid.refresh();
 	},
@@ -1123,7 +1125,42 @@ frappe.ui.form.on("Payment Entry", {
 			allocate_payment_amount: frappe.flags.allocate_payment_amount ?? false,
 		});
 
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_total_allocated_amount(frm);
+	},
+
+	get_gross_net_ratio: function (frm) {
+		// Ratio of gross paid amount to net (paid_amount_after_tax). Returns 1 when there
+		// are no included-in-paid-amount taxes, so callers can multiply unconditionally.
+		let included_taxes = 0;
+		for (const tax of frm.doc.taxes || []) {
+			if (!cint(tax.included_in_paid_amount)) continue;
+			const amount = flt(tax.tax_amount);
+			included_taxes += tax.add_deduct_tax === "Deduct" ? -amount : amount;
+		}
+		const paid = flt(frm.doc.paid_amount);
+		const net = paid - included_taxes;
+		return net ? paid / net : 1;
+	},
+
+	refresh_allocated_gross_amounts: function (frm) {
+		// Keep `allocated_gross_amount` on each reference in sync with the current
+		// allocated_amount and the gross/net ratio implied by included-in-paid-amount taxes.
+		// The server `set_allocated_gross_amount` will recompute the exact per-row breakdown
+		// (incl. linked-tax handling) at validate time; this just keeps the form-side preview
+		// reasonable while the user is editing.
+		const ratio = frm.events.get_gross_net_ratio(frm);
+		const precision = frappe.meta.get_field_precision(
+			frappe.meta.get_docfield("Payment Entry Reference", "allocated_gross_amount"),
+			frm.doc
+		);
+		for (const row of frm.doc.references || []) {
+			const new_gross = flt(flt(row.allocated_amount) * ratio, precision);
+			if (flt(new_gross, precision) !== flt(row.allocated_gross_amount, precision)) {
+				row.allocated_gross_amount = new_gross;
+			}
+		}
+		frm.refresh_field("references");
 	},
 
 	set_total_allocated_amount: function (frm) {
@@ -1784,8 +1821,33 @@ frappe.ui.form.on("Payment Entry Reference", {
 		}
 	},
 
-	allocated_amount: function (frm) {
+	allocated_amount: function (frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const ratio = frm.events.get_gross_net_ratio(frm);
+		const precision = frappe.meta.get_field_precision(
+			frappe.meta.get_docfield("Payment Entry Reference", "allocated_gross_amount"),
+			frm.doc
+		);
+		const new_gross = flt(flt(row.allocated_amount) * ratio, precision);
+		if (flt(new_gross, precision) !== flt(row.allocated_gross_amount, precision)) {
+			frappe.model.set_value(cdt, cdn, "allocated_gross_amount", new_gross);
+		}
 		frm.events.set_total_allocated_amount(frm);
+	},
+
+	allocated_gross_amount: function (frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const ratio = frm.events.get_gross_net_ratio(frm);
+		const precision = frappe.meta.get_field_precision(
+			frappe.meta.get_docfield("Payment Entry Reference", "allocated_amount"),
+			frm.doc
+		);
+		const new_net = ratio
+			? flt(flt(row.allocated_gross_amount) / ratio, precision)
+			: flt(row.allocated_gross_amount, precision);
+		if (flt(new_net, precision) !== flt(row.allocated_amount, precision)) {
+			frappe.model.set_value(cdt, cdn, "allocated_amount", new_net);
+		}
 	},
 
 	references_remove: function (frm) {
@@ -1796,31 +1858,37 @@ frappe.ui.form.on("Payment Entry Reference", {
 frappe.ui.form.on("Advance Taxes and Charges", {
 	rate: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 
 	tax_amount: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 
 	row_id: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 
 	taxes_remove: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 
 	included_in_paid_amount: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 
 	charge_type: function (frm) {
 		frm.events.apply_taxes(frm);
+		frm.events.refresh_allocated_gross_amounts(frm);
 		frm.events.set_unallocated_amount(frm);
 	},
 });

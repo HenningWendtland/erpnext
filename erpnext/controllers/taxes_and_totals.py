@@ -959,8 +959,16 @@ class calculate_taxes_and_totals:
 
 	def calculate_total_advance(self):
 		if not self.doc.docstatus.is_cancelled():
+			# `allocated_gross_amount` carries net + linked advance taxes from the
+			# source payment; `allocated_amount` (net) is the fallback for rows
+			# created before that field existed or for sources without advance
+			# taxes. Outstanding must subtract the full gross to stay in sync with
+			# the payment ledger.
 			total_allocated_amount = sum(
-				flt(adv.allocated_amount, adv.precision("allocated_amount"))
+				flt(
+					adv.get("allocated_gross_amount") or adv.allocated_amount,
+					adv.precision("allocated_amount"),
+				)
 				for adv in self.doc.get("advances")
 			)
 

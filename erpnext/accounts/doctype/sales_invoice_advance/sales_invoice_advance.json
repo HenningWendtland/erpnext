@@ -13,6 +13,7 @@
   "col_break1",
   "advance_amount",
   "allocated_amount",
+  "allocated_gross_amount",
   "exchange_gain_loss",
   "ref_exchange_rate",
   "difference_posting_date"
@@ -97,6 +98,14 @@
    "options": "party_account_currency",
    "print_width": "120px",
    "width": "120px"
+  },
+  {
+   "fieldname": "allocated_gross_amount",
+   "fieldtype": "Currency",
+   "label": "Allocated Gross",
+   "no_copy": 1,
+   "options": "party_account_currency",
+   "read_only": 1
   },
   {
    "depends_on": "exchange_gain_loss",

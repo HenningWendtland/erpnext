@@ -1513,14 +1513,24 @@ class AccountsController(TransactionBase):
 		)
 
 		self.set("advances", [])
-		advance_allocated = 0
+		# Drive the loop off gross amounts so the invoice's gross outstanding
+		# matches what the customer actually paid. `allocated_amount` (net) is
+		# back-derived per row from the source's net/gross ratio. For pre-PR
+		# sources (no advance-tax rows), gross == net and the loop behaves
+		# identically to the previous implementation.
+		advance_allocated_gross = 0
 		for d in res:
 			if self.get("party_account_currency") == self.company_currency:
 				amount = self.get("base_rounded_total") or self.base_grand_total
 			else:
 				amount = self.get("rounded_total") or self.grand_total
-			allocated_amount = min(amount - advance_allocated, d.amount)
-			advance_allocated += flt(allocated_amount)
+
+			source_net = flt(d.amount)
+			source_gross = flt(d.get("allocated_gross_amount")) or source_net
+
+			allocated_gross_amount = min(amount - advance_allocated_gross, source_gross)
+			allocated_amount = allocated_gross_amount * source_net / source_gross if source_gross else 0
+			advance_allocated_gross += flt(allocated_gross_amount)
 
 			advance_row = {
 				"doctype": self.doctype + " Advance",
@@ -1528,8 +1538,9 @@ class AccountsController(TransactionBase):
 				"reference_name": d.reference_name,
 				"reference_row": d.reference_row,
 				"remarks": d.remarks,
-				"advance_amount": flt(d.amount),
+				"advance_amount": source_net,
 				"allocated_amount": allocated_amount,
+				"allocated_gross_amount": allocated_gross_amount,
 				"ref_exchange_rate": flt(d.exchange_rate),  # exchange_rate of advance entry
 				"difference_posting_date": self.posting_date,
 			}
@@ -2481,7 +2492,10 @@ class AccountsController(TransactionBase):
 				consider_for_total_advance = False
 
 			if consider_for_total_advance:
-				total_allocated_amount += flt(adv.allocated_amount, adv.precision("allocated_amount"))
+				total_allocated_amount += flt(
+					adv.get("allocated_gross_amount") or adv.allocated_amount,
+					adv.precision("allocated_amount"),
+				)
 
 		frappe.db.set_value(
 			self.doctype, self.name, "total_advance", total_allocated_amount, update_modified=False
@@ -3395,6 +3409,7 @@ def get_advance_payment_entries(
 		q = q.inner_join(payment_ref).on(payment_entry.name == payment_ref.parent)
 		q = q.select(
 			(payment_ref.allocated_amount).as_("amount"),
+			(payment_ref.allocated_gross_amount),
 			(payment_ref.name).as_("reference_row"),
 			(payment_ref.reference_name).as_("against_order"),
 			(payment_entry.book_advance_payments_in_separate_party_account),

@@ -567,6 +567,53 @@ class TestPaymentEntry(ERPNextTestSuite):
 		si.reload()
 		self.assertEqual(flt(si.outstanding_amount, 2), 0.0)
 
+	def test_si_advance_allocated_gross_tracks_manual_edits(self):
+		"""When the user manually reduces `allocated_amount` on a fetched advance,
+		`allocated_gross_amount` must scale proportionally so `total_advance` stays
+		consistent with the source PE's gross/net ratio."""
+		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+
+		# SO grand_total = 119 so the SI can absorb the full gross advance.
+		so = make_sales_order(qty=1, rate=119)
+		pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		pe.paid_from = "Debtors - _TC"
+		pe.paid_amount = pe.received_amount = 119
+		pe.references[0].allocated_amount = 100
+		pe.append(
+			"taxes",
+			{
+				"account_head": "_Test Account Service Tax - _TC",
+				"charge_type": "On Paid Amount",
+				"rate": 19,
+				"tax_amount": 0,
+				"base_tax_amount": 0,
+				"add_deduct_tax": "Add",
+				"included_in_paid_amount": 1,
+				"description": "VAT 19%",
+			},
+		)
+		pe.save()
+		pe.submit()
+
+		si = make_sales_invoice(so.name)
+		si.allocate_advances_automatically = 1
+		si.save()
+		# Fetched row carries advance_gross_amount (119) alongside advance_amount (100).
+		self.assertEqual(flt(si.advances[0].advance_amount, 2), 100.0)
+		self.assertEqual(flt(si.advances[0].advance_gross_amount, 2), 119.0)
+		self.assertEqual(flt(si.advances[0].allocated_amount, 2), 100.0)
+		self.assertEqual(flt(si.advances[0].allocated_gross_amount, 2), 119.0)
+
+		# User reduces the net allocation by half. The gross must follow
+		# proportionally. Disable auto-allocation so the user's edit isn't
+		# overwritten by `set_advance_entries` on save.
+		si.allocate_advances_automatically = 0
+		si.advances[0].allocated_amount = 50.0
+		si.save()
+		self.assertEqual(flt(si.advances[0].allocated_amount, 2), 50.0)
+		self.assertEqual(flt(si.advances[0].allocated_gross_amount, 2), 59.5)
+		self.assertEqual(flt(si.total_advance, 2), 59.5)
+
 	def test_allocate_amount_to_references_subtracts_included_taxes(self):
 		"""`allocate_amount_to_references` distributes paid_amount_after_tax (not the
 		gross paid_amount) when there are included-in-paid-amount tax rows. So when

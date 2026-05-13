@@ -1539,6 +1539,7 @@ class AccountsController(TransactionBase):
 				"reference_row": d.reference_row,
 				"remarks": d.remarks,
 				"advance_amount": source_net,
+				"advance_gross_amount": source_gross,
 				"allocated_amount": allocated_amount,
 				"allocated_gross_amount": allocated_gross_amount,
 				"ref_exchange_rate": flt(d.exchange_rate),  # exchange_rate of advance entry

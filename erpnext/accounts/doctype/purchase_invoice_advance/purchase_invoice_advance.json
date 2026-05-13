@@ -12,6 +12,7 @@
   "reference_row",
   "col_break1",
   "advance_amount",
+  "advance_gross_amount",
   "allocated_amount",
   "allocated_gross_amount",
   "exchange_gain_loss",
@@ -84,6 +85,14 @@
    "print_width": "100px",
    "read_only": 1,
    "width": "100px"
+  },
+  {
+   "fieldname": "advance_gross_amount",
+   "fieldtype": "Currency",
+   "label": "Advance Gross",
+   "no_copy": 1,
+   "options": "party_account_currency",
+   "read_only": 1
   },
   {
    "columns": 2,

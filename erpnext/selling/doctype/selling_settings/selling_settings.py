@@ -39,6 +39,7 @@ class SellingSettings(Document):
 		allow_zero_qty_in_quotation: DF.Check
 		allow_zero_qty_in_sales_order: DF.Check
 		blanket_order_allowance: DF.Float
+		book_advance_payments_with_taxes: DF.Check
 		cust_master_name: DF.Literal["Customer Name", "Naming Series", "Auto Name"]
 		customer_group: DF.Link | None
 		deliver_secondary_items: DF.Check

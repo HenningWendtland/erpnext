@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_bulk_edit": 1,
  "creation": "2013-06-25 11:04:03",
  "doctype": "DocType",
  "document_type": "Other",
@@ -29,6 +30,7 @@
   "allow_negative_rates_for_items",
   "set_valuation_rate_for_rejected_materials",
   "disable_last_purchase_rate",
+  "book_advance_payments_with_taxes",
   "show_pay_button",
   "purchase_invoice_settings_section",
   "bill_for_rejected_quantity_in_purchase_invoice",
@@ -335,6 +337,13 @@
    "hidden": 1,
    "is_virtual": 1,
    "label": "Naming Series options"
+  },
+  {
+   "default": "0",
+   "description": "Copies tax rows into the Payment Entry as included-in-paid-amount tax rows.",
+   "fieldname": "book_advance_payments_with_taxes",
+   "fieldtype": "Check",
+   "label": "Copy taxes when creating Payment Entry against orders"
   }
  ],
  "grid_page_length": 50,
@@ -343,7 +352,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-05-05 16:30:37.184607",
+ "modified": "2026-05-12 20:09:44.980274",
  "modified_by": "Administrator",
  "module": "Buying",
  "name": "Buying Settings",

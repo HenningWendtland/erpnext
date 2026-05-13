@@ -833,6 +833,167 @@ class TestPaymentEntry(ERPNextTestSuite):
 		self.assertAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 701.98, delta=0.05)
 		self.assertNotAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 824.83, delta=1.0)
 
+	# --- Carry over of source-order taxes onto the Payment Entry ---
+
+	def _make_so_with_tax(
+		self,
+		qty=1,
+		rate=100,
+		tax_rate=19,
+		account="_Test Account Service Tax - _TC",
+		included_in_print_rate=0,
+	):
+		so = make_sales_order(qty=qty, rate=rate, do_not_submit=True)
+		so.append(
+			"taxes",
+			{
+				"charge_type": "On Net Total",
+				"account_head": account,
+				"description": f"Tax {tax_rate}%",
+				"rate": tax_rate,
+				"cost_center": "_Test Cost Center - _TC",
+				"included_in_print_rate": included_in_print_rate,
+			},
+		)
+		so.save()
+		so.submit()
+		return so
+
+	def test_carry_over_single_rate_exclusive_full_advance(self):
+		"""SO 100 net + 19% VAT exclusive (grand_total 119), full advance →
+		PE has one row at rate 19, paid=119, allocated=100, gross=119."""
+		so = self._make_so_with_tax(qty=1, rate=100, tax_rate=19)
+		try:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 1)
+			pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		finally:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 0)
+
+		self.assertEqual(len(pe.taxes), 1)
+		row = pe.taxes[0]
+		self.assertEqual(row.charge_type, "On Paid Amount")
+		self.assertEqual(flt(row.rate, 2), 19.0)
+		self.assertEqual(cint(row.included_in_paid_amount), 1)
+		self.assertEqual(row.add_deduct_tax, "Add")
+		self.assertEqual(flt(pe.paid_amount, 2), 119.0)
+		self.assertEqual(flt(pe.references[0].allocated_amount, 2), 100.0)
+		self.assertEqual(flt(pe.references[0].allocated_gross_amount, 2), 119.0)
+
+	def test_carry_over_inclusive_full_advance(self):
+		"""SO with included_in_print_rate=1 (B2B Germany style): item price 119
+		including 19% VAT → derived net 100. Full advance must produce a PE
+		whose gross matches the SO grand_total exactly."""
+		so = self._make_so_with_tax(qty=1, rate=119, tax_rate=19, included_in_print_rate=1)
+		try:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 1)
+			pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		finally:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 0)
+
+		self.assertEqual(flt(pe.paid_amount, 2), flt(so.grand_total, 2))
+		self.assertEqual(len(pe.taxes), 1)
+		self.assertEqual(flt(pe.taxes[0].rate, 2), 19.0)
+		self.assertEqual(flt(pe.references[0].allocated_amount, 2), flt(so.net_total, 2))
+		self.assertEqual(flt(pe.references[0].allocated_gross_amount, 2), flt(so.grand_total, 2))
+
+	def test_carry_over_inclusive_partial_advance(self):
+		"""Same inclusive SO, but pay half the gross. The derived rate is rate-based
+		so paid_amount_after_tax scales correctly."""
+		so = self._make_so_with_tax(qty=1, rate=119, tax_rate=19, included_in_print_rate=1)
+		try:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 1)
+			pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		finally:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 0)
+
+		# Halve the paid amount and re-distribute. set_amounts_in_company_currency
+		# refreshes base_paid_amount which apply_taxes (called inside
+		# allocate_amount_to_references) reads.
+		pe.paid_amount = pe.received_amount = flt(so.grand_total / 2, 2)
+		pe.set_amounts_in_company_currency()
+		pe.allocate_amount_to_references(
+			paid_amount=pe.paid_amount, paid_amount_change=True, allocate_payment_amount=True
+		)
+		pe.set_amounts()
+		pe.set_allocated_gross_amount()
+
+		self.assertEqual(flt(pe.paid_amount, 2), 59.5)
+		self.assertEqual(flt(pe.references[0].allocated_amount, 2), 50.0)
+		self.assertEqual(flt(pe.references[0].allocated_gross_amount, 2), 59.5)
+
+	def test_carry_over_groups_taxes_by_account(self):
+		"""Multiple SO tax rows on the same (account_head, add_deduct_tax) collapse
+		to one PE row whose rate is the combined fraction."""
+		so = make_sales_order(qty=1, rate=100, do_not_submit=True)
+		for _ in range(2):
+			so.append(
+				"taxes",
+				{
+					"charge_type": "On Net Total",
+					"account_head": "_Test Account Service Tax - _TC",
+					"description": "VAT slice",
+					"rate": 5,
+					"cost_center": "_Test Cost Center - _TC",
+				},
+			)
+		so.save()
+		so.submit()
+
+		try:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 1)
+			pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		finally:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 0)
+
+		# Two SO rows at 5% on net 100 = 10 total. Combined PE rate = 10%.
+		self.assertEqual(len(pe.taxes), 1)
+		self.assertEqual(flt(pe.taxes[0].rate, 2), 10.0)
+		self.assertEqual(flt(pe.paid_amount, 2), 110.0)
+		self.assertEqual(flt(pe.references[0].allocated_amount, 2), 100.0)
+		self.assertEqual(flt(pe.references[0].allocated_gross_amount, 2), 110.0)
+
+	def test_carry_over_skips_when_net_total_zero(self):
+		"""No items / zero net SO: skip the carry-over to avoid division by zero."""
+		so = make_sales_order(qty=1, rate=100, do_not_submit=True)
+		so.append(
+			"taxes",
+			{
+				"charge_type": "On Net Total",
+				"account_head": "_Test Account Service Tax - _TC",
+				"description": "VAT 19%",
+				"rate": 19,
+				"cost_center": "_Test Cost Center - _TC",
+			},
+		)
+		# Force net_total to zero via additional_discount_percentage (100% off).
+		so.apply_discount_on = "Net Total"
+		so.additional_discount_percentage = 100
+		so.save()
+		so.submit()
+
+		try:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 1)
+			pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		finally:
+			frappe.db.set_single_value("Selling Settings", "book_advance_payments_with_taxes", 0)
+
+		self.assertEqual(len(pe.taxes), 0)
+
+	def test_carry_over_setting_off_skips_copy(self):
+		"""Default behaviour with the setting off: no taxes are derived; matches
+		develop's behaviour exactly for users who don't opt in."""
+		so = self._make_so_with_tax(qty=1, rate=100, tax_rate=19)
+
+		self.assertEqual(
+			frappe.db.get_single_value("Selling Settings", "book_advance_payments_with_taxes") or 0,
+			0,
+			"This test relies on the default being off",
+		)
+		pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		self.assertEqual(len(pe.taxes), 0)
+		self.assertEqual(flt(pe.paid_amount, 2), 119.0)
+		self.assertEqual(flt(pe.references[0].allocated_amount, 2), 119.0)
+
 	def test_allocate_amount_to_references_subtracts_included_taxes(self):
 		"""`allocate_amount_to_references` distributes paid_amount_after_tax (not the
 		gross paid_amount) when there are included-in-paid-amount tax rows. So when

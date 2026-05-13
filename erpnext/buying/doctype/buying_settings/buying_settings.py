@@ -29,6 +29,7 @@ class BuyingSettings(Document):
 		]
 		bill_for_rejected_quantity_in_purchase_invoice: DF.Check
 		blanket_order_allowance: DF.Float
+		book_advance_payments_with_taxes: DF.Check
 		buying_price_list: DF.Link | None
 		disable_last_purchase_rate: DF.Check
 		fixed_email: DF.Link | None

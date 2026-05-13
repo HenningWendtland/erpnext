@@ -52,6 +52,7 @@
   "section_break_avhb",
   "enable_tracking_sales_commissions",
   "enable_discount_accounting",
+  "book_advance_payments_with_taxes",
   "enable_utm",
   "experimental_section",
   "use_legacy_js_reactivity",
@@ -404,6 +405,13 @@
   {
    "fieldname": "transaction_naming_html",
    "fieldtype": "HTML"
+  },
+  {
+   "default": "0",
+   "description": "Copies tax rows into the Payment Entry as included-in-paid-amount tax rows.",
+   "fieldname": "book_advance_payments_with_taxes",
+   "fieldtype": "Check",
+   "label": "Copy taxes when creating Payment Entry against orders"
   }
  ],
  "grid_page_length": 50,
@@ -412,7 +420,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-04-29 11:05:48.836362",
+ "modified": "2026-05-12 20:09:44.350972",
  "modified_by": "Administrator",
  "module": "Selling",
  "name": "Selling Settings",

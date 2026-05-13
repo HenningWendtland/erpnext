@@ -713,7 +713,7 @@ class PaymentEntry(AccountsController):
 						_("{0} {1} must be submitted").format(_(d.reference_doctype), d.reference_name)
 					)
 
-	def compute_advance_tax_breakdown(self):
+	def compute_advance_tax_breakdown(self, in_account_currency: bool = False):
 		"""Pure helper. Returns `{ref_row_name: {account_head: tax_amount}}` describing
 		how each included-in-paid advance tax row attributes to each reference.
 
@@ -722,12 +722,19 @@ class PaymentEntry(AccountsController):
 		`allocated_amount` share. The function does not mutate references; callers
 		that need to persist gross amounts use `set_allocated_gross_amount` which
 		wraps this method.
+
+		PE tax accounts are company-currency only, so `tax.tax_amount` is in company
+		currency. Pass `in_account_currency=True` to get the breakdown in
+		party-account currency (matches `allocated_amount`).
 		"""
 		references = self.get("references") or []
 		if not references:
 			return {}
 
 		precision = self.precision("allocated_amount", references[0])
+		rate = (
+			self.source_exchange_rate if self.payment_type == "Receive" else self.target_exchange_rate
+		) or 1
 
 		tax_by_account = {}  # account_head -> total
 		for tax in self.get("taxes") or []:
@@ -737,7 +744,10 @@ class PaymentEntry(AccountsController):
 				continue
 			if cint(tax.is_tax_withholding_account):
 				continue
-			tax_by_account[tax.account_head] = tax_by_account.get(tax.account_head, 0.0) + flt(tax.tax_amount)
+			amount = flt(tax.tax_amount)
+			if in_account_currency:
+				amount = flt(amount / rate, precision)
+			tax_by_account[tax.account_head] = tax_by_account.get(tax.account_head, 0.0) + amount
 
 		breakdown = {ref.name: {} for ref in references}
 		total_allocated = sum(flt(r.allocated_amount) for r in references)
@@ -771,7 +781,7 @@ class PaymentEntry(AccountsController):
 			return
 
 		precision = self.precision("allocated_amount", references[0])
-		breakdown = self.compute_advance_tax_breakdown()
+		breakdown = self.compute_advance_tax_breakdown(in_account_currency=True)
 		for ref in references:
 			tax_sum = flt(sum(breakdown.get(ref.name, {}).values()), precision)
 			ref.allocated_gross_amount = flt(flt(ref.allocated_amount) + tax_sum, precision)
@@ -1251,22 +1261,22 @@ class PaymentEntry(AccountsController):
 	def get_included_taxes(self, in_account_currency: bool = False):
 		"""Net signed sum of all `included_in_paid_amount` taxes.
 
-		By default returns the amount in **company** currency (`base_tax_amount`), to match
-		the existing call-sites that operate on `base_paid_amount`. Set
-		`in_account_currency=True` to get the same number in the transaction currency
-		(`tax_amount`) — useful when reasoning about `paid_amount` directly.
+		Returns company currency by default (matches `base_paid_amount`). Set
+		`in_account_currency=True` for party-account currency (matches `paid_amount`).
+		`calculate_taxes` writes `tax.tax_amount == tax.base_tax_amount` in company
+		currency, so the party-currency value must be derived via the exchange rate.
 		"""
-		field = "tax_amount" if in_account_currency else "base_tax_amount"
+		rate = (
+			self.source_exchange_rate if self.payment_type == "Receive" else self.target_exchange_rate
+		) or 1
 		included_taxes = 0
 		for tax in self.get("taxes"):
 			if not tax.included_in_paid_amount:
 				continue
-
-			if tax.add_deduct_tax == "Add":
-				included_taxes += flt(tax.get(field))
-			else:
-				included_taxes -= flt(tax.get(field))
-
+			amount = flt(tax.base_tax_amount)
+			if in_account_currency:
+				amount = flt(amount / rate, self.precision("paid_amount"))
+			included_taxes += amount if tax.add_deduct_tax == "Add" else -amount
 		return included_taxes
 
 	# Paid amount is auto allocated in the reference document by default.

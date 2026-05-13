@@ -1118,6 +1118,7 @@ def remove_ref_doc_link_from_pe(
 	(
 		qb.update(per)
 		.set(per.allocated_amount, 0)
+		.set(per.allocated_gross_amount, 0)
 		.set(per.modified, now())
 		.set(per.modified_by, frappe.session.user)
 		.where(per.name.isin(row_names))
@@ -1135,6 +1136,18 @@ def remove_ref_doc_link_from_pe(
 			[pe_doc.make_advance_gl_entries(x, cancel=1) for x in references]
 
 			pe_doc.clear_unallocated_reference_document_rows()
+
+			# Redistribute advance-tax shares across the surviving references
+			pe_doc.set_allocated_gross_amount()
+			for ref in pe_doc.references:
+				frappe.db.set_value(
+					"Payment Entry Reference",
+					ref.name,
+					"allocated_gross_amount",
+					ref.allocated_gross_amount,
+					update_modified=False,
+				)
+
 			pe_doc.validate_payment_type_with_outstanding()
 		except Exception:
 			msg = _("There were issues unlinking payment entry {0}.").format(pe_doc.name)

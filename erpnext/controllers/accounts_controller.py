@@ -1528,7 +1528,9 @@ class AccountsController(TransactionBase):
 			source_net = flt(d.amount)
 			source_gross = flt(d.get("allocated_gross_amount")) or source_net
 
-			allocated_gross_amount = min(amount - advance_allocated_gross, source_gross)
+			# Clamp to ≥ 0 to avoid floating-point drift
+			remaining_gross = max(flt(amount - advance_allocated_gross), 0)
+			allocated_gross_amount = min(remaining_gross, source_gross)
 			allocated_amount = allocated_gross_amount * source_net / source_gross if source_gross else 0
 			advance_allocated_gross += flt(allocated_gross_amount)
 

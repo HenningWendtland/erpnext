@@ -55,9 +55,9 @@
   "section_break_34",
   "total_allocated_amount",
   "base_total_allocated_amount",
-  "column_break_36",
   "unallocated_amount",
   "unallocated_gross_amount",
+  "column_break_36",
   "difference_amount",
   "write_off_difference_amount",
   "taxes_and_charges_section",
@@ -379,7 +379,6 @@
   },
   {
    "depends_on": "eval:(doc.paid_amount && doc.received_amount && doc.references)",
-   "description": "Gross unallocated portion (net + this portion's share of included-in-paid-amount advance taxes). Used to surface advance taxes to downstream invoices that consume the unallocated portion.",
    "fieldname": "unallocated_gross_amount",
    "fieldtype": "Currency",
    "label": "Unallocated Gross",
@@ -805,7 +804,7 @@
    "table_fieldname": "payment_entries"
   }
  ],
- "modified": "2026-03-09 17:15:30.453920",
+ "modified": "2026-05-14 04:04:00.903315",
  "modified_by": "Administrator",
  "module": "Accounts",
  "name": "Payment Entry",

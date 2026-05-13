@@ -3433,7 +3433,12 @@ def get_advance_payment_entries(
 			limit,
 			condition,
 		)
-		q = q.select((payment_entry.unallocated_amount).as_("amount"))
+		q = q.select(
+			(payment_entry.unallocated_amount).as_("amount"),
+			# Aliased to `allocated_gross_amount` so `set_advances` can use it the
+			# same way it does the allocated branch's gross.
+			(payment_entry.unallocated_gross_amount).as_("allocated_gross_amount"),
+		)
 		q = q.where(payment_entry.unallocated_amount > 0)
 
 		unallocated = list(q.run(as_dict=True))

@@ -147,6 +147,7 @@ class PaymentEntry(AccountsController):
 		total_allocated_amount: DF.Currency
 		total_taxes_and_charges: DF.Currency
 		unallocated_amount: DF.Currency
+		unallocated_gross_amount: DF.Currency
 	# end: auto-generated types
 
 	def __init__(self, *args, **kwargs):
@@ -714,18 +715,14 @@ class PaymentEntry(AccountsController):
 					)
 
 	def compute_advance_tax_breakdown(self, in_account_currency: bool = False):
-		"""Pure helper. Returns `{ref_row_name: {account_head: tax_amount}}` describing
-		how each included-in-paid advance tax row attributes to each reference.
+		"""Returns `{ref_row_name: {account_head: tax_amount}}` for included-in-paid
+		advance tax rows. Each ref's share = `tax * allocated_amount / total_net_paid`
+		so it depends only on its own `allocated_amount` and stays stable when other
+		refs are added or removed. Tax for the unallocated portion stays in the tax
+		account until later consumption.
 
-		Only `included_in_paid_amount=1`, `add_deduct_tax="Add"`, non-withholding rows
-		contribute. Taxes are distributed proportionally to each reference's
-		`allocated_amount` share. The function does not mutate references; callers
-		that need to persist gross amounts use `set_allocated_gross_amount` which
-		wraps this method.
-
-		PE tax accounts are company-currency only, so `tax.tax_amount` is in company
-		currency. Pass `in_account_currency=True` to get the breakdown in
-		party-account currency (matches `allocated_amount`).
+		PE tax accounts are company-currency only. Pass `in_account_currency=True` to
+		get the breakdown in party-account currency (matches `allocated_amount`).
 		"""
 		references = self.get("references") or []
 		if not references:
@@ -736,7 +733,7 @@ class PaymentEntry(AccountsController):
 			self.source_exchange_rate if self.payment_type == "Receive" else self.target_exchange_rate
 		) or 1
 
-		tax_by_account = {}  # account_head -> total
+		tax_by_account = {}
 		for tax in self.get("taxes") or []:
 			if not cint(tax.included_in_paid_amount):
 				continue
@@ -750,19 +747,23 @@ class PaymentEntry(AccountsController):
 			tax_by_account[tax.account_head] = tax_by_account.get(tax.account_head, 0.0) + amount
 
 		breakdown = {ref.name: {} for ref in references}
-		total_allocated = sum(flt(r.allocated_amount) for r in references)
-		if not tax_by_account or not total_allocated:
+		total_net_paid = flt(self.paid_amount) - self.get_included_taxes(in_account_currency=True)
+		if not tax_by_account or not total_net_paid:
 			return breakdown
 
-		# Per-account proportional split by allocated_amount share. The rounding
-		# remainder lands on the last reference so per-account shares sum exactly.
+		total_allocated = sum(flt(r.allocated_amount) for r in references)
+		fully_allocated = flt(total_allocated, precision) == flt(total_net_paid, precision)
+
+		# Remainder absorbs onto the last ref only when fully allocated — otherwise
+		# the un-attributed portion belongs with the unallocated remainder.
 		for account_head, total_amount in tax_by_account.items():
 			running = 0.0
 			for i, ref in enumerate(references):
-				if i == len(references) - 1:
+				is_last = i == len(references) - 1
+				if is_last and fully_allocated:
 					share = total_amount - running
 				else:
-					share = flt(total_amount * flt(ref.allocated_amount) / total_allocated, precision)
+					share = flt(total_amount * flt(ref.allocated_amount) / total_net_paid, precision)
 					running += share
 				breakdown[ref.name][account_head] = flt(
 					breakdown[ref.name].get(account_head, 0.0) + share, precision
@@ -771,20 +772,32 @@ class PaymentEntry(AccountsController):
 		return breakdown
 
 	def set_allocated_gross_amount(self):
-		"""Persist `allocated_gross_amount` on each reference row.
+		"""Persist `allocated_gross_amount` on each reference row, and the PE-level
+		`unallocated_gross_amount` for the remainder."""
+		# `set_amounts` in `validate` runs `set_unallocated_amount`/`set_difference_amount`
+		# *before* `apply_taxes`, so percentage-based included taxes are still 0 at
+		# that point and `unallocated_amount` doesn't subtract them. Re-run now.
+		self.set_unallocated_amount()
+		self.set_difference_amount()
 
-		`allocated_gross_amount = allocated_amount + this reference's share of
-		advance taxes`, where the share comes from `compute_advance_tax_breakdown`.
-		"""
 		references = self.get("references") or []
-		if not references:
-			return
+		if references:
+			ref_precision = self.precision("allocated_amount", references[0])
+			breakdown = self.compute_advance_tax_breakdown(in_account_currency=True)
+			for ref in references:
+				tax_sum = flt(sum(breakdown.get(ref.name, {}).values()), ref_precision)
+				ref.allocated_gross_amount = flt(flt(ref.allocated_amount) + tax_sum, ref_precision)
 
-		precision = self.precision("allocated_amount", references[0])
-		breakdown = self.compute_advance_tax_breakdown(in_account_currency=True)
-		for ref in references:
-			tax_sum = flt(sum(breakdown.get(ref.name, {}).values()), precision)
-			ref.allocated_gross_amount = flt(flt(ref.allocated_amount) + tax_sum, precision)
+		# Gross of the unallocated portion: lets a downstream invoice that consumes
+		# this PE pick up the tax share alongside the net (see `set_advances`).
+		precision = self.precision("paid_amount")
+		total_net_paid = flt(self.paid_amount) - self.get_included_taxes(in_account_currency=True)
+		if flt(self.unallocated_amount) and total_net_paid:
+			self.unallocated_gross_amount = flt(
+				flt(self.unallocated_amount) * flt(self.paid_amount) / total_net_paid, precision
+			)
+		else:
+			self.unallocated_gross_amount = flt(self.unallocated_amount)
 
 	def get_valid_reference_doctypes(self):
 		if self.party_type == "Customer":

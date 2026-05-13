@@ -668,22 +668,19 @@ class TestPaymentEntry(ERPNextTestSuite):
 		# producing a value > 30,000 — i.e. > 10x the actual USD gross.
 		self.assertAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 2499.93, delta=0.10)
 
-	def test_unlink_redistributes_allocated_gross_amount(self):
-		"""Unlinking one of several taxed-advance references must recompute
-		`allocated_gross_amount` on the surviving references so the freed tax share is
-		absorbed (and not silently stale in DB — the unlink flow does not save the PE,
-		so the new persistence loop has to update child rows directly).
-		`clear_unallocated_reference_document_rows` then deletes the unlinked row from
-		DB, so the surviving rows are what we must verify."""
+	def test_unlink_keeps_surviving_gross_stable(self):
+		"""Each ref's tax share is anchored to `total_net_paid` (not to the sum of
+		current allocations), so unlinking one ref must leave the surviving refs'
+		`allocated_gross_amount` unchanged. The unlinked row itself is deleted by
+		`clear_unallocated_reference_document_rows`."""
 		from erpnext.accounts.utils import remove_ref_doc_link_from_pe
 
-		# Two SOs with deliberately uneven shares of a 1547.39 gross advance + 17% VAT.
+		# Two SOs fully covering a 1547.39 gross advance + 17% VAT (net 1322.56).
 		so1 = make_sales_order(qty=1, rate=850.00)
 		so2 = make_sales_order(qty=1, rate=697.39)
 		pe = get_payment_entry("Sales Order", so1.name, bank_account="_Test Cash - _TC")
 		pe.paid_from = "Debtors - _TC"
 		pe.paid_amount = pe.received_amount = 1547.39
-		# Net portion: 1547.39 / 1.17 = 1322.56. Split unevenly between the two refs.
 		pe.references[0].allocated_amount = 700.00
 		pe.append(
 			"references",
@@ -711,39 +708,130 @@ class TestPaymentEntry(ERPNextTestSuite):
 		pe.save()
 		pe.submit()
 
-		# Sanity: gross totals match paid_amount across both refs (proportional split).
 		pe.reload()
 		so1_ref = next(r for r in pe.references if r.reference_name == so1.name)
 		so2_ref = next(r for r in pe.references if r.reference_name == so2.name)
+		# Fully allocated → grosses sum to paid_amount.
 		gross_sum = flt(so1_ref.allocated_gross_amount) + flt(so2_ref.allocated_gross_amount)
 		self.assertAlmostEqual(gross_sum, 1547.39, delta=0.05)
-
-		# Capture surviving ref's allocated_amount to compute expected post-unlink gross.
-		so2_allocated = flt(so2_ref.allocated_amount)
-		tax_total = flt(pe.taxes[0].tax_amount)
+		so2_gross_before = flt(so2_ref.allocated_gross_amount, 2)
 
 		remove_ref_doc_link_from_pe("Sales Order", so1.name, pe.name)
 
 		pe.reload()
-		# Unlinked row is deleted from DB (clear_unallocated removes
-		# zero-allocated rows).
 		self.assertFalse(
 			any(r.reference_name == so1.name for r in pe.references),
 			"unlinked row should be removed from DB",
 		)
-
-		# Surviving row: allocated_amount unchanged, allocated_gross_amount absorbs
-		# the full tax (it's the only ref left in the breakdown). Without the new
-		# `frappe.db.set_value` loop in `remove_ref_doc_link_from_pe`, this would
-		# still be the pre-unlink proportional share (~847 — net + ref's old tax
-		# slice), not the full gross.
+		# Stability: surviving ref's gross is unchanged. The freed tax share now
+		# belongs to the (newly grown) unallocated portion.
 		so2_ref = next(r for r in pe.references if r.reference_name == so2.name)
-		self.assertAlmostEqual(flt(so2_ref.allocated_amount, 2), so2_allocated, delta=0.01)
-		self.assertAlmostEqual(
-			flt(so2_ref.allocated_gross_amount, 2),
-			flt(so2_allocated + tax_total, 2),
-			delta=0.05,
+		self.assertEqual(flt(so2_ref.allocated_gross_amount, 2), so2_gross_before)
+
+	def test_unallocated_pe_consume_propagates_gross_to_si(self):
+		"""Fully-unallocated PE with included tax exposes its gross via
+		`unallocated_gross_amount`, so a downstream SI consuming the advance
+		applies the gross (net + tax-reversal) against its outstanding."""
+		company = "_Test Company"
+		advance_account = create_account(
+			parent_account="Current Assets - _TC",
+			account_name="Advances Received For Unallocated Tax Test",
+			company=company,
+			account_type="Receivable",
 		)
+		previous_advance_account = frappe.db.get_value("Company", company, "default_advance_received_account")
+		frappe.db.set_value(
+			"Company",
+			company,
+			{
+				"book_advance_payments_in_separate_party_account": 1,
+				"default_advance_received_account": advance_account,
+			},
+		)
+		try:
+			pe = create_payment_entry(
+				payment_type="Receive",
+				party_type="Customer",
+				party="_Test Customer",
+				paid_from="Debtors - _TC",
+				paid_to="_Test Cash - _TC",
+				paid_amount=1547.39,
+			)
+			pe.append(
+				"taxes",
+				{
+					"account_head": "_Test Account Service Tax - _TC",
+					"charge_type": "On Paid Amount",
+					"rate": 17,
+					"tax_amount": 0,
+					"base_tax_amount": 0,
+					"add_deduct_tax": "Add",
+					"included_in_paid_amount": 1,
+					"description": "VAT 17%",
+				},
+			)
+			pe.save()
+			pe.submit()
+
+			pe.reload()
+			self.assertAlmostEqual(flt(pe.unallocated_amount, 2), 1322.56, delta=0.05)
+			self.assertAlmostEqual(flt(pe.unallocated_gross_amount, 2), 1547.39, delta=0.05)
+
+			# Disable rounded_total so SI grand_total stays at 1547.39 — otherwise
+			# it'd round to 1547 and shave 0.39 off the consume.
+			si = create_sales_invoice(rate=1547.39, do_not_save=True)
+			si.disable_rounded_total = 1
+			si.allocate_advances_automatically = 1
+			si.insert()
+			si.submit()
+
+			si.reload()
+			self.assertEqual(len(si.advances), 1)
+			self.assertAlmostEqual(flt(si.advances[0].allocated_amount, 2), 1322.56, delta=0.05)
+			self.assertAlmostEqual(flt(si.advances[0].allocated_gross_amount, 2), 1547.39, delta=0.05)
+			# Outstanding clears: the tax-reversal GL leg added by PE's advance flow
+			# moves the 224.83 of tax from the tax account onto Debtors.
+			self.assertAlmostEqual(flt(si.outstanding_amount, 2), 0.0, delta=0.05)
+		finally:
+			frappe.db.set_value(
+				"Company",
+				company,
+				{
+					"book_advance_payments_in_separate_party_account": 0,
+					"default_advance_received_account": previous_advance_account,
+				},
+			)
+
+	def test_partial_allocation_anchors_tax_to_net_paid(self):
+		"""When refs cover only part of the PE's net, each ref gets exactly its own
+		`allocated_amount * tax_rate` — not the full tax pro-rated across refs. The
+		un-attributed remainder stays with the unallocated portion."""
+		so = make_sales_order(qty=1, rate=600.00)
+		pe = get_payment_entry("Sales Order", so.name, bank_account="_Test Cash - _TC")
+		pe.paid_from = "Debtors - _TC"
+		# Pay 1547.39 (net 1322.56 + tax 224.83) but only allocate 600 of net to the SO.
+		pe.paid_amount = pe.received_amount = 1547.39
+		pe.references[0].allocated_amount = 600.00
+		pe.append(
+			"taxes",
+			{
+				"account_head": "_Test Account Service Tax - _TC",
+				"charge_type": "On Paid Amount",
+				"rate": 17,
+				"tax_amount": 0,
+				"base_tax_amount": 0,
+				"add_deduct_tax": "Add",
+				"included_in_paid_amount": 1,
+				"description": "VAT 17%",
+			},
+		)
+		pe.save()
+
+		# Anchored share: 224.83 * 600 / 1322.56 = 101.98 → gross 701.98.
+		# Under the old "divide by total_allocated" formula this would have been
+		# 224.83 (full tax) → gross 824.83.
+		self.assertAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 701.98, delta=0.05)
+		self.assertNotAlmostEqual(flt(pe.references[0].allocated_gross_amount, 2), 824.83, delta=1.0)
 
 	def test_allocate_amount_to_references_subtracts_included_taxes(self):
 		"""`allocate_amount_to_references` distributes paid_amount_after_tax (not the

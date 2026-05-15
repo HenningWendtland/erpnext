@@ -3247,11 +3247,99 @@ def get_payment_entry(
 		pe.set_exchange_rate(ref_doc=doc)
 		pe.set_amounts()
 
+	if dt in ("Sales Order", "Purchase Order") and _should_book_advance_payments_with_taxes(dt):
+		_derive_advance_taxes_from_source(pe, doc)
+
 	# If PE is created from PR directly, then no need to find open PRs for the references
 	if not created_from_payment_request:
 		allocate_open_payment_requests_to_references(pe.references, pe.precision("paid_amount"))
 
 	return pe
+
+
+def _should_book_advance_payments_with_taxes(dt: str) -> bool:
+	settings_doctype = "Selling Settings" if dt == "Sales Order" else "Buying Settings"
+	return bool(frappe.get_cached_value(settings_doctype, None, "book_advance_payments_with_taxes"))
+
+
+def _derive_advance_taxes_from_source(pe, source_doc):
+	"""Derive Advance Tax rows on the Payment Entry from the source order's tax matrix.
+
+	Rather than copying source rows literally (which mixes charge types and ties to
+	the source's item table), we re-express each tax as a percentage of the *effective
+	net* — the amount the customer actually pays net of taxes (`grand_total - Σ taxes`).
+	Using `grand_total` rather than `net_total` as the anchor means any
+	post-tax adjustments (additional discount on grand total, rounding, etc.)
+	naturally fall out of the rate. Each (account_head, add_deduct_tax) group
+	gets one PE row with `charge_type="On Paid Amount"`,
+	`included_in_paid_amount=1`. The PE's `apply_taxes()` then applies the
+	percentage to the actual paid_amount — so the derived tax scales correctly
+	for partial advances and inclusive-tax source orders without us having to
+	reason about each source charge type.
+
+	Skips rows flagged as withholding (handled separately). Bails out on a
+	zero/negative effective net to avoid division by zero (e.g. fully-discounted
+	source order).
+	"""
+	if not source_doc.get("taxes"):
+		return
+
+	# Group by (account_head, add_deduct_tax). Add and Deduct rows on the same
+	# account stay separate so signed posting is preserved on the PE.
+	groups = {}
+	first_row_for_group = {}
+	signed_tax_sum = 0.0
+	for src in source_doc.get("taxes"):
+		if cint(src.get("is_tax_withholding_account")):
+			continue
+		amount = flt(src.tax_amount)
+		if not amount:
+			continue
+		add_deduct = src.get("add_deduct_tax") or "Add"
+		signed_tax_sum += amount if add_deduct == "Add" else -amount
+		key = (src.account_head, add_deduct)
+		groups[key] = groups.get(key, 0.0) + amount
+		first_row_for_group.setdefault(key, src)
+
+	if not groups:
+		return
+
+	# Customer pays grand_total; effective net is what's left after taxes settle.
+	# This is the right base for re-expressing each tax as an "On Paid Amount" rate
+	# under `included_in_paid_amount=1` semantics (net = paid / (1 + Σ rates)).
+	effective_net = flt(source_doc.grand_total) - signed_tax_sum
+	if effective_net <= 0:
+		return
+
+	pe.set("taxes", [])
+	for (account_head, add_deduct_tax), group_amount in groups.items():
+		rate = flt(group_amount / effective_net * 100, 9)
+		src = first_row_for_group[(account_head, add_deduct_tax)]
+		pe.append(
+			"taxes",
+			{
+				"charge_type": "On Paid Amount",
+				"account_head": account_head,
+				"description": src.description or account_head,
+				"cost_center": src.get("cost_center"),
+				"rate": rate,
+				"add_deduct_tax": add_deduct_tax,
+				"included_in_paid_amount": 1,
+			},
+		)
+
+	# Recompute tax_amounts, then push the net (paid_amount_after_tax) onto the
+	# reference row(s) so allocated_amount lands at net and allocated_gross_amount
+	# at gross.
+	pe.apply_taxes()
+	pe.set_amounts_after_tax()
+	pe.allocate_amount_to_references(
+		paid_amount=flt(pe.paid_amount),
+		paid_amount_change=True,
+		allocate_payment_amount=True,
+	)
+	pe.set_amounts()
+	pe.set_allocated_gross_amount()
 
 
 def get_open_payment_requests_for_references(references=None):

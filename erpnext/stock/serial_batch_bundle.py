@@ -1070,6 +1070,12 @@ class SerialBatchCreation:
 		self.__dict__.update(item_details)
 
 	def set_other_details(self):
+		from erpnext.stock.utils import get_combine_datetime
+
+		if not self.get("posting_datetime"):
+			if self.get("posting_date") and self.get("posting_time"):
+				self.posting_datetime = get_combine_datetime(self.posting_date, self.posting_time)
+
 		if not self.get("posting_datetime"):
 			self.posting_datetime = now()
 			self.__dict__["posting_datetime"] = self.posting_datetime

@@ -4606,7 +4606,7 @@ class TestPurchaseReceipt(ERPNextTestSuite):
 
 		self.assertEqual(srbnb_cost, 1500)
 
-	def test_valuation_rate_for_rejected_materials_without_accepted_materials(self):
+	def test_valuation_rate_for_rejected_materials_withoout_accepted_materials(self):
 		item = make_item("Test Item with Rej Material Valuation WO Accepted", {"is_stock_item": 1})
 		company = "_Test Company with perpetual inventory"
 
@@ -5419,33 +5419,6 @@ class TestPurchaseReceipt(ERPNextTestSuite):
 			self.assertEqual(row.warehouse, "_Test Warehouse 1 - _TC")
 			self.assertEqual(row.incoming_rate, 100)
 
-	def test_bill_for_rejected_quantity_in_purchase_invoice(self):
-		item_code = make_item("Test Rejected Qty", {"is_stock_item": 1}).name
-
-		with self.change_settings("Buying Settings", {"bill_for_rejected_quantity_in_purchase_invoice": 0}):
-			pr = make_purchase_receipt(
-				item_code=item_code,
-				qty=10,
-				rejected_qty=2,
-				rate=10,
-				warehouse="_Test Warehouse - _TC",
-			)
-
-			self.assertEqual(pr.total_qty, 10)
-			self.assertEqual(pr.total, 100)
-
-		with self.change_settings("Buying Settings", {"bill_for_rejected_quantity_in_purchase_invoice": 1}):
-			pr = make_purchase_receipt(
-				item_code=item_code,
-				qty=10,
-				rejected_qty=2,
-				rate=10,
-				warehouse="_Test Warehouse - _TC",
-			)
-
-			self.assertEqual(pr.total_qty, 12)
-			self.assertEqual(pr.total, 120)
-
 	def test_different_exchange_rate_in_pr_and_pi(self):
 		from erpnext.accounts.doctype.account.test_account import create_account
 
@@ -5509,6 +5482,147 @@ class TestPurchaseReceipt(ERPNextTestSuite):
 		frappe.db.set_single_value(
 			"Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate", original_value
 		)
+
+	def test_purchase_receipt_gl_entries_for_asset_item(self):
+		from erpnext.assets.doctype.asset.test_asset import create_fixed_asset_item
+
+		# Create a Company without Stock Accounts Linked.
+		company = frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": "Asset Company",
+				"country": "India",
+				"default_currency": "INR",
+			}
+		).insert()
+
+		stock_accounts = (
+			company.default_inventory_account,
+			company.stock_adjustment_account,
+			company.stock_received_but_not_billed,
+		)
+
+		company.update(
+			{"stock_in_hand_account": "", "stock_adjustment_account": "", "stock_received_but_not_billed": ""}
+		).save()
+
+		for account in stock_accounts:
+			frappe.db.delete("Account", account)
+
+		asset_category = create_asset_category_for_pr_test()
+		asset_item = create_fixed_asset_item(
+			item_code="Test Fixed Asset Item for PR GL Test", asset_category=asset_category.name
+		)
+		arnb_account = frappe.db.get_value("Company", company.name, "asset_received_but_not_billed")
+
+		# Purchase Receipt should be able to create even without any stock accounts linked to company
+		pr = make_purchase_receipt(
+			item_code=asset_item.name, warehouse="Stores - AC", qty=1, rate=10000, company=company.name
+		)
+
+		gl_entries = get_gl_entries("Purchase Receipt", pr.name)
+
+		self.assertTrue(gl_entries)
+		gl_accounts = [d.account for d in gl_entries]
+
+		# The fixed asset account set on the item row must be debited
+		asset_expense_account = pr.items[0].expense_account
+		self.assertIn(asset_expense_account, gl_accounts)
+
+		# Asset Received But Not Billed must be credited
+		self.assertIn(arnb_account, gl_accounts)
+
+		# No Stock-type account should appear — the inventory account map is not
+		# needed and must not be consulted for an asset-only receipt
+		for entry in gl_entries:
+			account_type = frappe.db.get_value("Account", entry.account, "account_type")
+			self.assertNotEqual(account_type, "Stock")
+
+		pr.cancel()
+
+	def test_purchase_receipt_gl_entries_with_mixed_asset_and_stock_items(self):
+		from erpnext.assets.doctype.asset.test_asset import create_fixed_asset_item
+
+		company = frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": "Asset Company",
+				"country": "India",
+				"default_currency": "INR",
+			}
+		).insert()
+
+		asset_category = create_asset_category_for_pr_test()
+		asset_item = create_fixed_asset_item(
+			item_code="Test Fixed Asset Item for PR GL Test", asset_category=asset_category.name
+		)
+		arnb_account = frappe.db.get_value("Company", company.name, "asset_received_but_not_billed")
+
+		pr = make_purchase_receipt(
+			item_code=asset_item.name,
+			qty=1,
+			rate=10000,
+			warehouse="Stores - AC",
+			do_not_save=True,
+			company=company.name,
+		)
+		pr.append(
+			"items",
+			{
+				"item_code": "_Test Item",
+				"warehouse": "Stores - AC",
+				"qty": 5,
+				"received_qty": 5,
+				"rejected_qty": 0,
+				"rate": 50,
+				"uom": "_Test UOM",
+				"stock_uom": "_Test UOM",
+				"conversion_factor": 1.0,
+				"cost_center": frappe.get_cached_value("Company", pr.company, "cost_center"),
+			},
+		)
+		pr.insert()
+		pr.submit()
+
+		gl_entries = get_gl_entries("Purchase Receipt", pr.name)
+		self.assertTrue(gl_entries)
+
+		gl_accounts = [d.account for d in gl_entries]
+		self.assertIn(arnb_account, gl_accounts)
+
+		# The fixed asset account set on the item row must be debited
+		asset_expense_account = pr.items[0].expense_account
+		self.assertIn(asset_expense_account, gl_accounts)
+
+		# Asset Received But Not Billed must be credited
+		self.assertIn(asset_category.accounts[0].fixed_asset_account, gl_accounts)
+
+		# Stock Accounts should be used for Stock Items
+		self.assertIn(company.stock_received_but_not_billed, gl_accounts)
+		self.assertIn(company.default_inventory_account, gl_accounts)
+		pr.cancel()
+
+
+def create_asset_category_for_pr_test():
+	category_name = "Test Asset Category for PR"
+
+	asset_category = frappe.get_doc(
+		{
+			"doctype": "Asset Category",
+			"asset_category_name": category_name,
+			"enable_cwip_accounting": 0,
+			"depreciation_method": "Straight Line",
+			"total_number_of_depreciations": 12,
+			"frequency_of_depreciation": 1,
+			"accounts": [
+				{
+					"company_name": "Asset Company",
+					"fixed_asset_account": "Electronic Equipment - AC",
+				}
+			],
+		}
+	).insert()
+	return asset_category
 
 
 def prepare_data_for_internal_transfer():

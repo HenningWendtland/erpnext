@@ -10,10 +10,10 @@
  "modified": "2017-02-24 20:13:38.914651", 
  "modified_by": "Administrator", 
  "module": "Stock", 
- "name": "Supplier-Wise Sales Analytics", 
+ "name": "Item Wise Consumption", 
  "owner": "Administrator", 
  "ref_doctype": "Stock Ledger Entry", 
- "report_name": "Supplier-Wise Sales Analytics", 
+ "report_name": "Item Wise Consumption", 
  "report_type": "Script Report", 
  "roles": [
   {
